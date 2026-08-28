@@ -17,6 +17,16 @@ make
 ./overkill
 ```
 
+To launch it as `overkill` from any terminal:
+
+```sh
+make install
+```
+
+This installs to `~/.local/bin/overkill`. If `~/.local/bin` is not already on
+your `PATH`, add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zshrc`, then open a
+new terminal or run `source ~/.zshrc`.
+
 Commands are run by `/bin/sh`, so pipes, redirects, substitutions, and existing
 command-line tools work normally. `cd`, `context`, `trust`, `help`, and `exit` are
 built in. Set `NO_COLOR=1` to disable ANSI colors.
