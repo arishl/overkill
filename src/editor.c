@@ -12,7 +12,7 @@
 #include <unistd.h>
 
 #define LINE_MAX_SIZE 4096
-
+"Hello"
 static void history_push(History *h, const char *line) {
     if (!*line) return;
     if (h->count == h->capacity) {
