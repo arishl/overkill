@@ -32,6 +32,7 @@ int jobs_start(JobTable *table, const char *command, const char *project);
 int jobs_stop(JobTable *table, int id);
 int jobs_restart(JobTable *table, int id, const char *project);
 void jobs_print(JobTable *table);
+int jobs_logs(JobTable *table, int id, size_t lines);
 void jobs_shutdown(JobTable *table);
 
 #endif

@@ -31,9 +31,16 @@ printf '%s\n' "$feature_output" | grep 'TODO' >/dev/null
 overkill_bin=$PWD/overkill
 mkdir "$tmpdir/managed"
 printf 'all:\n\t@true\n' > "$tmpdir/managed/Makefile"
-managed_output=$(cd "$tmpdir/managed" && printf 'start sleep 30\njobs\nstop 1\nexit\n' | NO_COLOR=1 "$overkill_bin")
+managed_output=$(cd "$tmpdir/managed" && printf 'start sleep 30\njobs\nlogs 1\nstop 1\nexit\n' | NO_COLOR=1 "$overkill_bin")
 printf '%s\n' "$managed_output" | grep 'sleep 30' >/dev/null
 printf '%s\n' "$managed_output" | grep 'stopped' >/dev/null
+
+mkdir -p "$tmpdir/qol/sub" "$tmpdir/qol-home"
+printf 'all:\n\t@true\n' > "$tmpdir/qol/Makefile"
+qol_output=$(cd "$tmpdir/qol/sub" && printf 'mark project\nmkcd scratch/deep\nup 2\njump project\nroot\npwd\ndoctor\nexit\n' | HOME="$tmpdir/qol-home" NO_COLOR=1 "$overkill_bin")
+printf '%s\n' "$qol_output" | grep 'Marked project' >/dev/null
+printf '%s\n' "$qol_output" | grep "$tmpdir/qol$" >/dev/null
+printf '%s\n' "$qol_output" | grep 'Overkill doctor' >/dev/null
 
 mkdir "$tmpdir/cmake" "$tmpdir/rust" "$tmpdir/node" "$tmpdir/python" "$tmpdir/go"
 : > "$tmpdir/cmake/CMakeLists.txt"

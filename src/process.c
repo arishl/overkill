@@ -106,6 +106,25 @@ void jobs_print(JobTable *table) {
     }
 }
 
+int jobs_logs(JobTable *table, int id, size_t lines) {
+    ManagedJob *job = NULL;
+    if (id > 0) job = find_job(table, id);
+    else if (table->count) job = &table->items[table->count - 1];
+    if (!job) { fprintf(stderr, "overkill: logs: no matching managed job\n"); return 1; }
+    FILE *f = fopen(job->log_path, "r");
+    if (!f) { fprintf(stderr, "overkill: logs: %s\n", strerror(errno)); return 1; }
+    if (!lines) lines = 50;
+    char **ring = calloc(lines, sizeof(*ring));
+    if (!ring) { fclose(f); return 1; }
+    char *line = NULL; size_t cap = 0, count = 0;
+    while (getline(&line, &cap, f) >= 0) { free(ring[count % lines]); ring[count++ % lines] = strdup(line); }
+    size_t shown = count < lines ? count : lines, start = count > lines ? count % lines : 0;
+    printf("==> %s <==\n", job->log_path);
+    for (size_t i = 0; i < shown; i++) fputs(ring[(start + i) % lines], stdout);
+    for (size_t i = 0; i < lines; i++) free(ring[i]);
+    free(ring); free(line); fclose(f); return 0;
+}
+
 void jobs_shutdown(JobTable *table) {
     for (size_t i = 0; i < table->count; i++) if (table->items[i].state == JOB_RUNNING) kill(-table->items[i].pid, SIGTERM);
     jobs_reap(table);

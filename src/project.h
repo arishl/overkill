@@ -3,6 +3,8 @@
 
 int project_build(const char *build, const char *project);
 int project_run(const char *build, const char *project);
+int project_test(const char *build, const char *project);
+int project_clean(const char *build, const char *project);
 int project_files(const char *project);
 int project_todo(const char *project);
 int project_ports(void);

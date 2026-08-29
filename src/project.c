@@ -65,6 +65,29 @@ int project_run(const char *build, const char *project) {
     printf("%s\n", command); return shell_in(project, command, false);
 }
 
+int project_test(const char *build, const char *project) {
+    const char *command = NULL;
+    if (!strcmp(build, "make")) command = "make test";
+    else if (!strcmp(build, "cmake")) command = "ctest --test-dir build --output-on-failure";
+    else if (!strcmp(build, "cargo")) command = "cargo test";
+    else if (!strcmp(build, "npm")) command = "npm test";
+    else if (!strcmp(build, "go")) command = "go test ./...";
+    else if (!strcmp(build, "python")) command = "python -m pytest";
+    if (!command) { fprintf(stderr, "overkill: test: no test command detected\n"); return 1; }
+    printf("%s\n", command); return shell_in(project, command, false);
+}
+
+int project_clean(const char *build, const char *project) {
+    const char *command = NULL;
+    if (!strcmp(build, "make")) command = "make clean";
+    else if (!strcmp(build, "cmake")) command = "cmake --build build --target clean";
+    else if (!strcmp(build, "cargo")) command = "cargo clean";
+    else if (!strcmp(build, "npm")) command = "npm run clean --if-present";
+    else if (!strcmp(build, "go")) command = "go clean";
+    if (!command) { fprintf(stderr, "overkill: clean: no clean command detected\n"); return 1; }
+    printf("%s\n", command); return shell_in(project, command, false);
+}
+
 typedef struct { char ext[24]; size_t count; } Extension;
 
 static bool ignored_dir(const char *name) {

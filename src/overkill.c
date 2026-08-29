@@ -13,6 +13,7 @@
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "editor.h"
@@ -22,6 +23,8 @@
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
+
+#define OVERKILL_VERSION "0.2.0"
 
 typedef struct {
     char cwd[PATH_MAX];
@@ -223,15 +226,22 @@ static size_t terminal_width(void) {
     return width;
 }
 
+static size_t display_width(const char *text_value) {
+    size_t width = 0;
+    for (const unsigned char *p = (const unsigned char *)text_value; *p; p++)
+        if ((*p & 0xc0) != 0x80) width++;
+    return width;
+}
+
 static void prompt_segment(const char *label, const char *value, const char *value_color,
                            bool color, bool *first, size_t *used) {
     const char *dim = color ? "\033[2m" : "", *reset = color ? "\033[0m" : "";
     if (!*first) { printf("%s  ·  %s", dim, reset); *used += 5; }
     printf("%s%s%s %s%s%s", dim, label, reset, color ? value_color : "", value, reset);
-    *used += strlen(label) + 1 + strlen(value); *first = false;
+    *used += display_width(label) + 1 + display_width(value); *first = false;
 }
 
-static void print_context(const Context *c, bool color, size_t job_count, int last_status) {
+static void print_context(const Context *c, bool color, size_t job_count, int last_status, double duration) {
     char path_buffer[PATH_MAX], short_path[PATH_MAX], jobs_value[32];
     const char *path = display_path(c->cwd, path_buffer, sizeof(path_buffer));
     const char *dim = color ? "\033[2m" : "", *cyan = color ? "\033[1;36m" : "";
@@ -243,7 +253,7 @@ static void print_context(const Context *c, bool color, size_t job_count, int la
         const char *tail = path + strlen(path) - (path_limit - 2);
         snprintf(short_path, sizeof(short_path), "…%s", tail); path = short_path;
     }
-    size_t path_len = strlen(path), fill = width > path_len + 5 ? width - path_len - 5 : 2;
+    size_t path_len = display_width(path), fill = width > path_len + 5 ? width - path_len - 5 : 2;
     printf("%s╭─%s %s%s%s ", dim, reset, cyan, path, reset);
     for (size_t i = 0; i < fill; i++) fputs("─", stdout);
     printf("%s╮%s\n%s│%s  ", dim, reset, dim, reset);
@@ -261,6 +271,7 @@ static void print_context(const Context *c, bool color, size_t job_count, int la
     char vm_value[96];
     snprintf(vm_value, sizeof(vm_value), "%s%s%s", c->in_vm ? "yes (" : "no", c->in_vm ? c->vm_type : "", c->in_vm ? ")" : "");
     prompt_segment("vm", vm_value, c->in_vm ? yellow : green, color, &first, &used);
+    if (duration >= 0.1) { char elapsed[32]; snprintf(elapsed, sizeof(elapsed), duration < 10 ? "%.2fs" : "%.1fs", duration); prompt_segment("took", elapsed, yellow, color, &first, &used); }
     snprintf(jobs_value, sizeof(jobs_value), "%zu", job_count);
     prompt_segment("jobs", jobs_value, job_count ? yellow : green, color, &first, &used);
     if (used + 1 < width) for (size_t i = used; i + 1 < width; i++) putchar(' ');
@@ -469,6 +480,73 @@ static void enter_project(const Context *context, char *active, size_t active_si
     if (*hook) run_command(hook);
 }
 
+static int mkdir_parents(char *path) {
+    for (char *p = path + 1; *p; p++) if (*p == '/') { *p = '\0'; if (mkdir(path, 0755) < 0 && errno != EEXIST) { *p = '/'; return 1; } *p = '/'; }
+    return mkdir(path, 0755) < 0 && errno != EEXIST;
+}
+
+static int mkcd_command(char *argument, char *previous, size_t previous_size) {
+    argument = trim(argument); if (!*argument) { fprintf(stderr, "overkill: mkcd: directory required\n"); return 2; }
+    char path[PATH_MAX];
+    if (*argument == '~' && (argument[1] == '/' || !argument[1])) snprintf(path, sizeof(path), "%s%s", getenv("HOME") ? getenv("HOME") : "", argument + 1);
+    else snprintf(path, sizeof(path), "%s", argument);
+    if (mkdir_parents(path)) { fprintf(stderr, "overkill: mkcd: %s\n", strerror(errno)); return 1; }
+    return change_dir(path, previous, previous_size);
+}
+
+static int up_command(const char *argument, char *previous, size_t previous_size) {
+    long levels = 1; char *end = NULL;
+    if (argument && *trim((char *)argument)) { errno = 0; levels = strtol(trim((char *)argument), &end, 10); if (errno || *end || levels < 1 || levels > 100) { fprintf(stderr, "overkill: up: expected a level from 1 to 100\n"); return 2; } }
+    char path[PATH_MAX] = ".."; for (long i = 1; i < levels; i++) strncat(path, "/..", sizeof(path) - strlen(path) - 1);
+    return change_dir(path, previous, previous_size);
+}
+
+static bool valid_mark_name(const char *name) {
+    if (!*name) return false;
+    for (const unsigned char *p = (const unsigned char *)name; *p; p++) if (!isalnum(*p) && *p != '_' && *p != '-') return false;
+    return true;
+}
+
+static int marks_path(char *path, size_t size) {
+    const char *home = getenv("HOME"); if (!home) return 1; snprintf(path, size, "%s/.overkill_marks", home); return 0;
+}
+
+static int mark_command(const char *name) {
+    if (!valid_mark_name(name)) { fprintf(stderr, "overkill: mark: use letters, numbers, '-' or '_'\n"); return 2; }
+    char path[PATH_MAX], cwd[PATH_MAX]; if (marks_path(path, sizeof(path)) || !getcwd(cwd, sizeof(cwd))) return 1;
+    FILE *f = fopen(path, "a"); if (!f) { fprintf(stderr, "overkill: mark: %s\n", strerror(errno)); return 1; }
+    fprintf(f, "%s\t%s\n", name, cwd); fclose(f); printf("Marked %s → %s\n", name, cwd); return 0;
+}
+
+static int marks_command(const char *jump_name, char *previous, size_t previous_size) {
+    char path[PATH_MAX]; if (marks_path(path, sizeof(path))) return 1; FILE *f = fopen(path, "r");
+    if (!f) { if (jump_name) fprintf(stderr, "overkill: jump: mark '%s' not found\n", jump_name); else puts("No directory marks yet. Use 'mark <name>'."); return jump_name ? 1 : 0; }
+    char *line = NULL, target[PATH_MAX] = ""; size_t cap = 0;
+    if (!jump_name) puts("NAME                 DIRECTORY");
+    while (getline(&line, &cap, f) >= 0) { char *tab = strchr(line, '\t'); if (!tab) continue; *tab++ = '\0'; tab[strcspn(tab, "\r\n")] = '\0'; if (!jump_name) printf("%-20s %s\n", line, tab); else if (!strcmp(line, jump_name)) snprintf(target, sizeof(target), "%s", tab); }
+    free(line); fclose(f);
+    if (!jump_name) return 0;
+    if (!*target) { fprintf(stderr, "overkill: jump: mark '%s' not found\n", jump_name); return 1; }
+    return change_dir(target, previous, previous_size);
+}
+
+static bool command_available(const char *name) {
+    const char *path_env = getenv("PATH"); char *paths = path_env ? strdup(path_env) : NULL, *save = NULL; bool found = false;
+    for (char *dir = paths ? strtok_r(paths, ":", &save) : NULL; dir && !found; dir = strtok_r(NULL, ":", &save)) { char path[PATH_MAX]; snprintf(path, sizeof(path), "%s/%s", *dir ? dir : ".", name); found = access(path, X_OK) == 0; }
+    free(paths); return found;
+}
+
+static int doctor_command(const Context *context) {
+    const char *tools[] = {"git", "make", "cmake", "cargo", "npm", "go", "python", "lsof", NULL};
+    puts("Overkill doctor\n");
+    printf("  project   %s\n", context->is_project ? context->project : "not detected");
+    printf("  vm        %s%s%s\n", context->in_vm ? "yes (" : "no", context->in_vm ? context->vm_type : "", context->in_vm ? ")" : "");
+    printf("  config    %s/.overkillrc\n", getenv("HOME") ? getenv("HOME") : "~");
+    puts("\nTools:");
+    for (size_t i = 0; tools[i]; i++) printf("  %-10s %s\n", tools[i], command_available(tools[i]) ? "✓" : "—");
+    return 0;
+}
+
 typedef struct {
     const char *name;
     const char *usage;
@@ -482,6 +560,8 @@ static const HelpEntry help_entries[] = {
     {"context", "context", "Print the current project panel", "Shows Git, language, build system, environment, VM, Lima, and managed-job state."},
     {"build", "build", "Build the detected project", "Runs make, CMake, Cargo, npm, Go, or Python build logic. Override with build= in .overkillrc."},
     {"run", "run", "Run the detected project", "Infers the project run command. Override with run= in a trusted project .overkillrc."},
+    {"test", "test", "Test the detected project", "Runs the native Make, CTest, Cargo, npm, Go, or pytest test command."},
+    {"clean", "clean", "Clean project build outputs", "Runs the build system's native clean target; no direct recursive deletion is performed."},
     {"files", "files", "Summarize project files", "Counts source files recursively by extension while excluding generated and vendor directories."},
     {"todo", "todo", "Find TODO and FIXME comments", "Prints source location, line number, and matching comment."},
     {"changed", "changed", "Show changed Git files", "Equivalent to a concise git status for the current project."},
@@ -494,6 +574,16 @@ static const HelpEntry help_entries[] = {
     {"trust", "trust", "Trust project configuration", "Allows the current project's reviewed .overkillrc environment and on_enter hook."},
     {"help", "help [command]", "Show help", "Displays the command menu or detailed help for one built-in command."},
     {"exit", "exit [status]", "Exit Overkill", "Stops managed processes and exits with the optional numeric status."},
+    {"mkcd", "mkcd <directory>", "Create and enter a directory", "Creates missing parent directories, then changes into the new directory."},
+    {"up", "up [levels]", "Move up directory levels", "Moves up one level by default; for example, 'up 3' changes to ../../..."},
+    {"root", "root", "Jump to the current project root", "Changes directly to the detected project root from any nested directory."},
+    {"mark", "mark <name>", "Bookmark the current directory", "Saves a named directory bookmark in ~/.overkill_marks."},
+    {"jump", "jump <name>", "Jump to a directory bookmark", "Changes to the most recently saved path for the named mark."},
+    {"marks", "marks", "List directory bookmarks", "Shows saved bookmark names and their directories."},
+    {"logs", "logs [job-id]", "Show managed-process logs", "Prints the last 50 lines for a job, or for the newest job when no ID is given."},
+    {"reload", "reload", "Reload Overkill configuration", "Reloads ~/.overkillrc and re-enters the current project configuration."},
+    {"doctor", "doctor", "Check the current environment", "Reports project and VM detection plus availability of useful development tools."},
+    {"version", "version", "Show the Overkill version", "Prints the installed Overkill release version."},
     {NULL, NULL, NULL, NULL}
 };
 
@@ -516,12 +606,13 @@ static int print_help(const char *command, bool color) {
     puts("NAVIGATION");
     for (size_t i = 0; i < 2; i++) printf("  %s%-26s%s %s\n", cyan, help_entries[i].usage, reset, help_entries[i].summary);
     puts("\nPROJECT");
-    for (size_t i = 2; i < 9; i++) printf("  %s%-26s%s %s\n", cyan, help_entries[i].usage, reset, help_entries[i].summary);
+    for (size_t i = 2; i < 11; i++) printf("  %s%-26s%s %s\n", cyan, help_entries[i].usage, reset, help_entries[i].summary);
     puts("\nPROCESSES");
-    for (size_t i = 9; i < 13; i++) printf("  %s%-26s%s %s\n", cyan, help_entries[i].usage, reset, help_entries[i].summary);
+    for (size_t i = 11; i < 15; i++) printf("  %s%-26s%s %s\n", cyan, help_entries[i].usage, reset, help_entries[i].summary);
     puts("\nSHELL");
-    for (size_t i = 13; help_entries[i].name; i++) printf("  %s%-26s%s %s\n", cyan, help_entries[i].usage, reset, help_entries[i].summary);
+    for (size_t i = 15; help_entries[i].name; i++) printf("  %s%-26s%s %s\n", cyan, help_entries[i].usage, reset, help_entries[i].summary);
     printf("\n%sAny other input is executed by /bin/sh, including pipes and redirects.%s\n", dim, reset);
+    printf("%sShortcuts: '..' is up 1, '...' is up 2, 'status' is context, and 'q' exits.%s\n", dim, reset);
     printf("%sConfig: ~/.overkillrc and trusted project .overkillrc files.%s\n", dim, reset);
     printf("%sTry 'help <command>' for details.%s\n", dim, reset);
     return 0;
@@ -530,6 +621,8 @@ static int print_help(const char *command, bool color) {
 int main(int argc, char **argv) {
     sanitize_environment();
     if (argc > 2 && !strcmp(argv[1], "-c")) return run_command(argv[2]);
+    if (argc == 2 && (!strcmp(argv[1], "--version") || !strcmp(argv[1], "-V"))) { printf("overkill %s\n", OVERKILL_VERSION); return 0; }
+    if (argc == 2 && (!strcmp(argv[1], "--help") || !strcmp(argv[1], "-h"))) return print_help(NULL, false);
     if (argc != 1) { fprintf(stderr, "usage: overkill [-c command]\n"); return 2; }
     bool interactive = isatty(STDIN_FILENO);
     const char *home = getenv("HOME");
@@ -549,12 +642,16 @@ int main(int argc, char **argv) {
     JobTable jobs;
     jobs_init(&jobs);
     int last_status = 0;
+    struct timespec command_started = {0}, command_finished;
+    bool timing = false;
+    double last_duration = 0;
     while (true) {
+        if (timing) { clock_gettime(CLOCK_MONOTONIC, &command_finished); last_duration = command_finished.tv_sec - command_started.tv_sec + (command_finished.tv_nsec - command_started.tv_nsec) / 1e9; timing = false; }
         Context context;
         detect_context(&context);
         jobs_reap(&jobs);
         enter_project(&context, active_project, sizeof(active_project), interactive);
-        if (interactive) print_context(&context, isatty(STDOUT_FILENO) && !getenv("NO_COLOR"), jobs_running(&jobs), last_status);
+        if (interactive) print_context(&context, isatty(STDOUT_FILENO) && !getenv("NO_COLOR"), jobs_running(&jobs), last_status, last_duration);
         errno = 0;
         if (interactive) {
             free(line); line = editor_readline(&history);
@@ -566,11 +663,12 @@ int main(int argc, char **argv) {
         if (interrupted) { interrupted = 0; continue; }
         char *cmd = trim(line);
         if (!*cmd) continue;
+        clock_gettime(CLOCK_MONOTONIC, &command_started); timing = true;
         if (interactive) history_add(&history, cmd);
         if (interactive && strcmp(cmd, "resume")) state_record(&context, cmd);
-        if (!strcmp(cmd, "exit")) break;
+        if (!strcmp(cmd, "exit") || !strcmp(cmd, "q")) break;
         if (!strncmp(cmd, "exit ", 5)) { last_status = atoi(trim(cmd + 5)); break; }
-        if (!strcmp(cmd, "context")) { print_context(&context, false, jobs_running(&jobs), last_status); putchar('\n'); continue; }
+        if (!strcmp(cmd, "context") || !strcmp(cmd, "status")) { print_context(&context, false, jobs_running(&jobs), last_status, last_duration); putchar('\n'); continue; }
         if (!strcmp(cmd, "help")) { last_status = print_help(NULL, interactive && isatty(STDOUT_FILENO) && !getenv("NO_COLOR")); continue; }
         if (!strncmp(cmd, "help ", 5)) { last_status = print_help(trim(cmd + 5), interactive && isatty(STDOUT_FILENO) && !getenv("NO_COLOR")); continue; }
         if (!strcmp(cmd, "history") || !strcmp(cmd, "history --full")) { history_print(&history, 0); last_status = 0; continue; }
@@ -583,15 +681,33 @@ int main(int argc, char **argv) {
         if (!strcmp(cmd, "trust")) { last_status = trust_project(&context); active_project[0] = '\0'; continue; }
         if (!strcmp(cmd, "build")) { last_status = project_build(context.build, context.project); continue; }
         if (!strcmp(cmd, "run")) { last_status = project_run(context.build, context.project); continue; }
+        if (!strcmp(cmd, "test")) { last_status = project_test(context.build, context.project); continue; }
+        if (!strcmp(cmd, "clean")) { last_status = project_clean(context.build, context.project); continue; }
         if (!strcmp(cmd, "files")) { last_status = project_files(context.project); continue; }
         if (!strcmp(cmd, "todo")) { last_status = project_todo(context.project); continue; }
         if (!strcmp(cmd, "ports")) { last_status = project_ports(); continue; }
         if (!strcmp(cmd, "changed")) { last_status = project_changed(context.project); continue; }
         if (!strcmp(cmd, "resume")) { last_status = state_resume(); active_project[0] = '\0'; continue; }
+        if (!strcmp(cmd, "root")) { last_status = context.is_project ? change_dir(context.project, previous, sizeof(previous)) : (fprintf(stderr, "overkill: root: no project detected\n"), 1); continue; }
+        if (!strcmp(cmd, "..")) { last_status = up_command("1", previous, sizeof(previous)); continue; }
+        if (!strcmp(cmd, "...")) { last_status = up_command("2", previous, sizeof(previous)); continue; }
+        if (!strcmp(cmd, "up") || !strncmp(cmd, "up ", 3)) { last_status = up_command(cmd[2] ? trim(cmd + 3) : "", previous, sizeof(previous)); continue; }
+        if (!strncmp(cmd, "mkcd ", 5)) { last_status = mkcd_command(cmd + 5, previous, sizeof(previous)); continue; }
+        if (!strncmp(cmd, "mark ", 5)) { last_status = mark_command(trim(cmd + 5)); continue; }
+        if (!strcmp(cmd, "marks")) { last_status = marks_command(NULL, previous, sizeof(previous)); continue; }
+        if (!strncmp(cmd, "jump ", 5)) { last_status = marks_command(trim(cmd + 5), previous, sizeof(previous)); continue; }
         if (!strcmp(cmd, "jobs")) { jobs_print(&jobs); last_status = 0; continue; }
+        if (!strcmp(cmd, "logs")) { last_status = jobs_logs(&jobs, 0, 50); continue; }
+        if (!strncmp(cmd, "logs ", 5)) { last_status = jobs_logs(&jobs, atoi(trim(cmd + 5)), 50); continue; }
         if (!strncmp(cmd, "start ", 6)) { last_status = jobs_start(&jobs, trim(cmd + 6), context.project); continue; }
         if (!strncmp(cmd, "stop ", 5)) { last_status = jobs_stop(&jobs, atoi(trim(cmd + 5))); continue; }
         if (!strncmp(cmd, "restart ", 8)) { last_status = jobs_restart(&jobs, atoi(trim(cmd + 8)), context.project); continue; }
+        if (!strcmp(cmd, "doctor")) { last_status = doctor_command(&context); continue; }
+        if (!strcmp(cmd, "version")) { printf("overkill %s\n", OVERKILL_VERSION); last_status = 0; continue; }
+        if (!strcmp(cmd, "reload")) {
+            if (home) { char config[PATH_MAX]; snprintf(config, sizeof(config), "%s/.overkillrc", home); char hook[1]; load_config(config, false, hook, sizeof(hook)); }
+            active_project[0] = '\0'; last_status = 0; puts("Overkill configuration reloaded."); continue;
+        }
         if (!strncmp(cmd, "cd", 2) && (cmd[2] == '\0' || isspace((unsigned char)cmd[2])))
             last_status = change_dir(cmd + 2, previous, sizeof(previous));
         else last_status = run_command(cmd);

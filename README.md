@@ -27,6 +27,9 @@ This installs to `~/.local/bin/overkill`. If `~/.local/bin` is not already on
 your `PATH`, add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zshrc`, then open a
 new terminal or run `source ~/.zshrc`.
 
+Use `overkill --help` for the command menu and `overkill --version` to inspect the
+installed release without starting an interactive shell.
+
 Commands are run by `/bin/sh`, so pipes, redirects, substitutions, and existing
 command-line tools work normally. `cd`, `context`, `trust`, `help`, and `exit` are
 built in. Set `NO_COLOR=1` to disable ANSI colors.
@@ -39,7 +42,17 @@ built in. Set `NO_COLOR=1` to disable ANSI colors.
   `history 20` prints only the latest 20 entries.
 - Tab completes a unique filesystem path and appends `/` for directories.
 - Ctrl-C clears the current input and Ctrl-D exits from an empty prompt.
+- Ctrl-A/Ctrl-E jump to the start/end; Ctrl-U/Ctrl-K erase to the start/end;
+  Ctrl-W erases one word; Ctrl-L clears and redraws the input.
+- Ctrl-R searches backward through persistent command history; press it repeatedly
+  to move through older matches.
+- Tab completes built-ins, executables on `PATH`, and filesystem paths. Ambiguous
+  matches expand to their longest shared prefix.
 - `help` opens the categorized command menu; `help <command>` shows detailed usage.
+
+Navigation conveniences include `mkcd path`, `up 3`, `root`, `..`, and `...`.
+Use `mark work` to bookmark the current directory, `jump work` to return, and
+`marks` to list bookmarks. `status` aliases `context`, while `q` aliases `exit`.
 
 ## Configuration and project hooks
 
@@ -94,6 +107,8 @@ instance name in a project `.lima` file, to show it in the prompt.
 
 Other project-aware commands:
 
+- `test` runs the detected framework's native test command.
+- `clean` uses the build system's clean target without directly deleting trees.
 - `files` recursively summarizes file extensions, excluding generated/vendor trees.
 - `todo` reports TODO/FIXME comments with file and line number.
 - `changed` prints concise Git changes.
@@ -120,6 +135,12 @@ restart 1
 lifecycle state; the prompt shows the running count. `stop` sends `SIGTERM` to the
 whole process group, while `restart` relaunches its saved command. Remaining
 managed processes receive `SIGTERM` when `overkill` exits.
+
+Use `logs` for the latest managed job or `logs <id>` for a specific job. The last
+50 lines are shown without starting an external pager. `doctor` summarizes project
+and VM detection plus installed development tools. `reload` reapplies configuration
+without restarting the shell. Commands taking at least 100ms show a `took` segment
+in the following prompt.
 
 ## Migration from ctxsh
 

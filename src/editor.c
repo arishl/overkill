@@ -12,7 +12,6 @@
 #include <unistd.h>
 
 #define LINE_MAX_SIZE 4096
-"Hello"
 static void history_push(History *h, const char *line) {
     if (!*line) return;
     if (h->count == h->capacity) {
@@ -74,7 +73,40 @@ static void replace_line(char *buf, size_t *len, size_t *cursor, const char *val
     redraw(buf, *len, *cursor);
 }
 
+static void common_match(char *match, size_t size, size_t *matches, const char *candidate) {
+    if (!*matches) snprintf(match, size, "%s", candidate);
+    else { size_t i = 0; while (match[i] && candidate[i] && match[i] == candidate[i]) i++; match[i] = '\0'; }
+    (*matches)++;
+}
+
+static bool complete_command(char *buf, size_t *len, size_t *cursor) {
+    if (memchr(buf, ' ', *cursor) || memchr(buf, '\t', *cursor)) return false;
+    char prefix[LINE_MAX_SIZE]; memcpy(prefix, buf, *cursor); prefix[*cursor] = '\0';
+    const char *builtins[] = {"build", "cd", "changed", "clean", "context", "doctor", "exit", "files", "help", "history",
+        "jobs", "jump", "logs", "mark", "marks", "mkcd", "ports", "reload", "restart", "resume", "root", "run",
+        "start", "stop", "test", "todo", "trust", "up", "version", NULL};
+    char match[LINE_MAX_SIZE] = ""; size_t matches = 0;
+    for (size_t i = 0; builtins[i]; i++) if (!strncmp(builtins[i], prefix, strlen(prefix))) common_match(match, sizeof(match), &matches, builtins[i]);
+    const char *path_env = getenv("PATH"); char *paths = path_env ? strdup(path_env) : NULL, *save = NULL;
+    for (char *dir = paths ? strtok_r(paths, ":", &save) : NULL; dir; dir = strtok_r(NULL, ":", &save)) {
+        DIR *d = opendir(*dir ? dir : "."); if (!d) continue; struct dirent *entry;
+        while ((entry = readdir(d))) if (!strncmp(entry->d_name, prefix, strlen(prefix))) {
+            char full[LINE_MAX_SIZE]; struct stat st; snprintf(full, sizeof(full), "%s/%s", *dir ? dir : ".", entry->d_name);
+            if (stat(full, &st) == 0 && S_ISREG(st.st_mode) && access(full, X_OK) == 0) common_match(match, sizeof(match), &matches, entry->d_name);
+        }
+        closedir(d);
+    }
+    free(paths);
+    if (!matches || strlen(match) <= strlen(prefix)) return matches > 0;
+    size_t add = strlen(match) - strlen(prefix); if (*len + add + 2 >= LINE_MAX_SIZE) return true;
+    memmove(buf + *cursor + add, buf + *cursor, *len - *cursor + 1); memcpy(buf + *cursor, match + strlen(prefix), add);
+    *cursor += add; *len += add;
+    if (matches == 1 && *cursor == *len) { buf[(*len)++] = ' '; buf[*len] = '\0'; (*cursor)++; }
+    redraw(buf, *len, *cursor); return true;
+}
+
 static void complete_path(char *buf, size_t *len, size_t *cursor) {
+    if (complete_command(buf, len, cursor)) return;
     size_t start = *cursor;
     while (start && !isspace((unsigned char)buf[start - 1])) start--;
     char token[LINE_MAX_SIZE];
@@ -94,11 +126,11 @@ static void complete_path(char *buf, size_t *len, size_t *cursor) {
     while ((entry = readdir(d))) {
         if (!strncmp(entry->d_name, prefix, strlen(prefix)) &&
             (prefix[0] == '.' || entry->d_name[0] != '.')) {
-            snprintf(match, sizeof(match), "%s", entry->d_name); matches++;
+            common_match(match, sizeof(match), &matches, entry->d_name);
         }
     }
     closedir(d);
-    if (matches != 1) { write(STDOUT_FILENO, "\a", 1); return; }
+    if (!matches || strlen(match) <= strlen(prefix)) { write(STDOUT_FILENO, "\a", 1); return; }
     const char *suffix = match + strlen(prefix);
     size_t add = strlen(suffix);
     if (*len + add + 2 >= LINE_MAX_SIZE) return;
@@ -107,10 +139,10 @@ static void complete_path(char *buf, size_t *len, size_t *cursor) {
     char full[LINE_MAX_SIZE];
     snprintf(full, sizeof(full), "%s/%s", dir, match);
     struct stat st;
-    if (stat(full, &st) == 0 && S_ISDIR(st.st_mode)) {
+    if (matches == 1 && stat(full, &st) == 0 && S_ISDIR(st.st_mode)) {
         memmove(buf + *cursor + 1, buf + *cursor, *len - *cursor + 1);
         buf[(*cursor)++] = '/'; (*len)++;
-    } else if (*cursor == *len) { buf[(*cursor)++] = ' '; buf[++(*len) - 1] = ' '; buf[*len] = '\0'; }
+    } else if (matches == 1 && *cursor == *len) { buf[(*cursor)++] = ' '; buf[++(*len) - 1] = ' '; buf[*len] = '\0'; }
     redraw(buf, *len, *cursor);
 }
 
@@ -124,12 +156,27 @@ char *editor_readline(History *h) {
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) < 0) return NULL;
     char buf[LINE_MAX_SIZE] = ""; size_t len = 0, cursor = 0;
     size_t history_pos = h->count;
+    size_t search_pos = h->count; char search_query[LINE_MAX_SIZE] = ""; bool searching = false;
     while (true) {
         unsigned char ch;
         if (read(STDIN_FILENO, &ch, 1) != 1) { tcsetattr(STDIN_FILENO, TCSAFLUSH, &old); return NULL; }
         if (ch == '\r' || ch == '\n') { write(STDOUT_FILENO, "\r\n", 2); break; }
         if (ch == 4 && len == 0) { tcsetattr(STDIN_FILENO, TCSAFLUSH, &old); return NULL; }
+        if (ch == 4 && cursor < len) { memmove(buf + cursor, buf + cursor + 1, len - cursor); len--; redraw(buf, len, cursor); continue; }
         if (ch == 3) { len = cursor = 0; buf[0] = '\0'; write(STDOUT_FILENO, "^C\r\n", 4); break; }
+        if (ch == 1) { cursor = 0; redraw(buf, len, cursor); continue; }
+        if (ch == 5) { cursor = len; redraw(buf, len, cursor); continue; }
+        if (ch == 11) { buf[cursor] = '\0'; len = cursor; redraw(buf, len, cursor); continue; }
+        if (ch == 21) { memmove(buf, buf + cursor, len - cursor + 1); len -= cursor; cursor = 0; redraw(buf, len, cursor); continue; }
+        if (ch == 23 && cursor) { size_t start = cursor; while (start && isspace((unsigned char)buf[start - 1])) start--; while (start && !isspace((unsigned char)buf[start - 1])) start--; memmove(buf + start, buf + cursor, len - cursor + 1); len -= cursor - start; cursor = start; redraw(buf, len, cursor); continue; }
+        if (ch == 12) { printf("\033[2J\033[H"); redraw(buf, len, cursor); continue; }
+        if (ch == 18) {
+            if (!searching) { snprintf(search_query, sizeof(search_query), "%s", buf); search_pos = h->count; searching = true; }
+            bool found = false;
+            while (search_pos) { search_pos--; if (strstr(h->items[search_pos], search_query)) { replace_line(buf, &len, &cursor, h->items[search_pos]); found = true; break; } }
+            if (!found) write(STDOUT_FILENO, "\a", 1);
+            continue;
+        }
         if (ch == '\t') { complete_path(buf, &len, &cursor); continue; }
         if ((ch == 127 || ch == 8) && cursor) {
             memmove(buf + cursor - 1, buf + cursor, len - cursor + 1); cursor--; len--; redraw(buf, len, cursor); continue;
@@ -137,6 +184,7 @@ char *editor_readline(History *h) {
         if (ch == 27) {
             unsigned char seq[2];
             if (read(STDIN_FILENO, seq, 2) != 2 || seq[0] != '[') continue;
+            searching = false;
             if (seq[1] == 'D' && cursor) { cursor--; write(STDOUT_FILENO, "\033[D", 3); }
             else if (seq[1] == 'C' && cursor < len) { cursor++; write(STDOUT_FILENO, "\033[C", 3); }
             else if (seq[1] == 'A' && history_pos) { history_pos--; replace_line(buf, &len, &cursor, h->items[history_pos]); }
@@ -144,6 +192,7 @@ char *editor_readline(History *h) {
             continue;
         }
         if (isprint(ch) && len + 1 < sizeof(buf)) {
+            searching = false;
             memmove(buf + cursor + 1, buf + cursor, len - cursor + 1); buf[cursor++] = (char)ch; len++; redraw(buf, len, cursor);
         }
     }
